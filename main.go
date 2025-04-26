@@ -2,11 +2,11 @@ package main
 
 import (
 	"fmt"
-	"math"
+	"log"
 	"net/http"
 	_ "net/http/pprof"
 	"os"
-	"strconv"
+	"runtime/pprof"
 	"sync"
 	"time"
 )
@@ -14,11 +14,11 @@ import (
 // The task is to write a Java program which reads the file, calculates the min, mean, and max temperature value per weather station, and emits the results on stdout like this (i.e. sorted alphabetically by station name, and the result values per station in the format <min>/<mean>/<max>, rounded to one fractional digit):
 
 type Data struct {
-	Sum   float64
+	Sum   int
 	Count int
-	Avg   float64
-	Min   float64
-	Max   float64
+	Avg   int
+	Min   int
+	Max   int
 }
 
 type SafeStations struct {
@@ -27,7 +27,7 @@ type SafeStations struct {
 }
 
 var safeStations = SafeStations{
-	stations: map[string]*Data{},
+	stations: make(map[string]*Data, 9000),
 }
 
 func init() {
@@ -36,14 +36,17 @@ func init() {
 	}()
 }
 
-func NewData() *Data {
-	return &Data{
-		Min: math.MaxFloat64,
-		Max: -math.MaxFloat64,
-	}
-}
-
 func main() {
+	f, err := os.Create("cpu.pprof")
+	if err != nil {
+		log.Fatal("could not create CPU profile: ", err)
+	}
+	defer f.Close()
+
+	if err := pprof.StartCPUProfile(f); err != nil {
+		log.Fatal("could not start CPU profile: ", err)
+	}
+	defer pprof.StopCPUProfile()
 
 	start := time.Now()
 	parseData()
@@ -51,10 +54,33 @@ func main() {
 	fmt.Printf("The `for` loop took %s", timeElapsed)
 }
 
+var startNumberChar = byte(48)
+
+func parseToInt(data []byte) int {
+	i := 0
+	multiply := 1
+
+	if data[i] == '-' {
+		i++
+		multiply = -1
+	}
+
+	var temp int
+	// We now there is only one decimal place, and can be 1 or 2 digit before .
+	if data[i+1] != '.' {
+		temp = int(data[i]-startNumberChar)*100 + int(data[i+1]-startNumberChar)*10 + int(data[i+3]-startNumberChar)
+	} else {
+		temp = int(data[i]-startNumberChar)*10 + int(data[i+2]-startNumberChar)
+	}
+
+	return temp * multiply
+
+}
+
 func calculateData(data []byte) map[string]*Data {
 	startPointer := 0
 	semicolomPointer := 0
-	safeStations2 := map[string]*Data{}
+	stations := map[string]*Data{}
 	for i := 0; i < len(data); i++ {
 		if data[i] == ';' {
 
@@ -63,36 +89,37 @@ func calculateData(data []byte) map[string]*Data {
 
 		if data[i] == '\n' {
 			station := string(data[startPointer:semicolomPointer])
-			val := 0.0
-			val, err := strconv.ParseFloat(string(data[semicolomPointer+1:i]), 64)
-			if err != nil {
-				fmt.Println(semicolomPointer, i)
-				panic(err)
-			}
+			temp := 0
+			temp = parseToInt(data[semicolomPointer+1 : i])
+
 			startPointer = i + 1
 
-			data, isOk := safeStations2[station]
+			data := stations[station]
 
-			if !isOk {
-				data = NewData()
+			if data == nil {
+				stations[station] = &Data{
+					Min:   temp,
+					Max:   temp,
+					Sum:   temp,
+					Count: 1,
+				}
+			} else {
+				data.Sum += temp
+				data.Count++
+				if data.Min > temp {
+					data.Min = temp
+				}
+
+				if data.Max < temp {
+					data.Max = temp
+				}
+
 			}
 
-			data.Sum += val
-			data.Count++
-			if data.Min > val {
-				data.Min = val
-			}
-
-			if data.Max < val {
-				data.Max = val
-			}
-
-			data.Avg = data.Sum / float64(data.Count)
-
-			safeStations2[station] = data
 		}
 	}
-	return safeStations2
+	return stations
+
 }
 
 func parseData() {
@@ -135,14 +162,14 @@ func parseData() {
 			res := calculateData(d)
 			for station, stats := range res {
 				safeStations.mu.Lock()
-				safeStation, isOk := safeStations.stations[station]
+				safeStation := safeStations.stations[station]
 
-				if !isOk {
-					safeStation = stats
+				if safeStation == nil {
+					safeStations.stations[station] = stats
 				} else {
 					safeStation.Count += stats.Count
 					safeStation.Sum += stats.Sum
-					safeStation.Avg = safeStations.stations[station].Sum / float64(safeStations.stations[station].Count)
+					safeStation.Avg = safeStations.stations[station].Sum / safeStations.stations[station].Count
 					if safeStation.Min > stats.Min {
 						safeStation.Min = stats.Min
 					}
@@ -152,7 +179,6 @@ func parseData() {
 					}
 
 				}
-				safeStations.stations[station] = safeStation
 				safeStations.mu.Unlock()
 			}
 
@@ -163,7 +189,7 @@ func parseData() {
 	wg.Wait()
 	for station, stats := range safeStations.stations {
 		fmt.Printf("Station: %s, Avg: %.2f, Sum: %.2f, Min: %.2f, Max: %.2f\n",
-			station, stats.Avg, stats.Sum, stats.Min, stats.Max)
+			station, stats.Avg/10, stats.Sum/10, stats.Min/10, stats.Max/10)
 	}
 
 	// file, err = os.Create("data1.json")
